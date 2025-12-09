@@ -7,10 +7,10 @@ from fastapi import HTTPException, status, Request
 from bson import ObjectId
 
 from app.core.config import settings
-from app.models.user import UserInDB
-from app.models.session import UserSession, SessionPlatform
-from app.models.token import TokenBlacklist, TokenType
-from app.schemas.auth import LoginRequest, RegisterRequest
+from app.domain.models.user import UserInDB
+from app.domain.models.session import UserSession, SessionPlatform
+from app.domain.models.token import TokenBlacklist, TokenType
+from app.domain.schemas.auth import LoginRequest, RegisterRequest
 
 class AuthService:
     def __init__(self, db):

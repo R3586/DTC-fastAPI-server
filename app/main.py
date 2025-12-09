@@ -1,105 +1,219 @@
+"""
+DTC Backend - Main Application
+"""
+
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 import time
-import uuid
 
 from app.core.config import settings
 from app.core.database import database
-from app.api.v1 import auth, users
+from app.api.middlewares import setup_middlewares
+from app.api.errors import setup_exception_handlers
+from app.api.v1 import api_v1_router
+from app.utils.logger import logger
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
-    await database.connect()
+    """
+    Lifespan manager para manejar startup/shutdown events
+    """
+    # ========== STARTUP ==========
+    logger.info("🚀  Desplegando DTC Server...")
+    
+    # Conectar a la base de datos
+    try:
+        await database.connect()
+        logger.info("✅  BD conectado exitosamente")
+    except Exception as e:
+        logger.error(f"❌  Fallo al conectar con la BD: {e}")
+        raise
+    
+    # Inicializar storage (se inicializa automáticamente al importar)
+    from app.core.storage import storage_client
+    logger.info(f"✅  Almacenamiento inicializado. Proveedor: {storage_client.provider}")
+    
     yield
-    # Shutdown
+    
+    # ========== SHUTDOWN ==========
+    logger.info("🛑  Cerrando DTC Server...")
+    
+    # Desconectar de la base de datos
     await database.disconnect()
+    logger.info("🛑  BD desconectado exitosamente")
 
-# Crear app
+
+# Crear aplicación FastAPI
 app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
-    openapi_url="/api/v1/openapi.json",
-    docs_url="/api/docs",
-    redoc_url="/api/redoc",
-    lifespan=lifespan
+    openapi_url="/api/v1/openapi.json" if settings.DEBUG else None,
+    docs_url="/api/docs" if settings.DEBUG else None,
+    redoc_url="/api/redoc" if settings.DEBUG else None,
+    lifespan=lifespan,
+    swagger_ui_parameters={
+        "syntaxHighlight.theme": "monokai",
+        "tryItOutEnabled": True,
+        "displayRequestDuration": True,
+    }
 )
 
-# Middlewares
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.BACKEND_CORS_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=["*"]
-)
 
-app.add_middleware(
-    TrustedHostMiddleware,
-    allowed_hosts=["*"]  # En producción especificar dominios
-)
+# ========== CONFIGURAR MIDDLEWARES ==========
+setup_middlewares(app)
 
-# Middleware para logging y request ID
-@app.middleware("http")
-async def add_process_time_header(request: Request, call_next):
-    request_id = str(uuid.uuid4())
-    request.state.request_id = request_id
-    
-    start_time = time.time()
-    
-    try:
-        response = await call_next(request)
-    except Exception as e:
-        # Log error
-        print(f"Error in request {request_id}: {e}")
-        raise e
-    
-    process_time = time.time() - start_time
-    response.headers["X-Process-Time"] = str(process_time)
-    response.headers["X-Request-ID"] = request_id
-    
-    return response
 
-# Rutas
-app.include_router(auth.router, prefix="/api/v1")
-app.include_router(users.router, prefix="/api/v1")
+# ========== CONFIGURAR HANDLERS DE ERRORES ==========
+setup_exception_handlers(app)
 
-# Health check
+
+# ========== INCLUIR ROUTERS ==========
+app.include_router(api_v1_router, prefix="/api")
+
+
+# ========== RUTAS GLOBALES ==========
+@app.get("/")
+async def root():
+    """
+    Página principal de la API
+    """
+    return {
+        "message": f"Welcome to {settings.APP_NAME} API",
+        "version": settings.APP_VERSION,
+        "autor": "Evan",
+        "environment": settings.ENVIRONMENT,
+        "docs": "/api/docs" if settings.DEBUG else None,
+        "health": "/health",
+        "status": "operational"
+    }
+
+
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "timestamp": time.time()}
+    """
+    Health check del sistema
+    
+    Verifica que todos los servicios estén funcionando correctamente
+    """
+    health_status = {
+        "status": "healthy",
+        "timestamp": time.time(),
+        "service": settings.APP_NAME,
+        "version": settings.APP_VERSION,
+        "environment": settings.ENVIRONMENT,
+        "checks": {}
+    }
+    
+    # Verificar MongoDB
+    try:
+        await database.db.command("ping")
+        health_status["checks"]["mongodb"] = {
+            "status": "healthy",
+            "latency": "N/A"
+        }
+    except Exception as e:
+        health_status["checks"]["mongodb"] = {
+            "status": "unhealthy",
+            "error": str(e)
+        }
+        health_status["status"] = "degraded"
+    
+    # Verificar Storage
+    try:
+        from app.core.storage import storage_client
+        # Intentar operación simple
+        if hasattr(storage_client, 'client'):
+            health_status["checks"]["storage"] = {
+                "status": "healthy",
+                "provider": storage_client.provider
+            }
+        else:
+            health_status["checks"]["storage"] = {
+                "status": "unhealthy",
+                "error": "Storage client not initialized"
+            }
+            health_status["status"] = "degraded"
+    except Exception as e:
+        health_status["checks"]["storage"] = {
+            "status": "unhealthy",
+            "error": str(e)
+        }
+        health_status["status"] = "degraded"
+    
+    return health_status
 
-# Error handlers
-@app.exception_handler(HTTPException)
-async def http_exception_handler(request: Request, exc: HTTPException):
+
+@app.get("/info")
+async def system_info():
+    """
+    Información del sistema
+    
+    Retorna información técnica sobre la API y configuración
+    """
+    from app.core.config import settings
+    
+    return {
+        "app": {
+            "name": settings.APP_NAME,
+            "version": settings.APP_VERSION,
+            "environment": settings.ENVIRONMENT,
+            "debug": settings.DEBUG,
+        },
+        "api": {
+            "version": "v1",
+            "base_path": "/api/v1",
+            "docs_available": settings.DEBUG,
+        },
+        "database": {
+            "type": "mongodb",
+            "name": settings.MONGODB_DB_NAME,
+        },
+        "storage": {
+            "provider": settings.STORAGE_PROVIDER,
+            "bucket": settings.STORAGE_BUCKET,
+        },
+        "security": {
+            "jwt_enabled": True,
+            "access_token_expiry_minutes": settings.ACCESS_TOKEN_EXPIRE_MINUTES,
+            "refresh_token_expiry_days": settings.REFRESH_TOKEN_EXPIRE_DAYS,
+        }
+    }
+
+
+# ========== MANEJADOR PARA RUTAS NO ENCONTRADAS ==========
+@app.get("/{full_path:path}")
+async def catch_all(full_path: str):
+    """
+    Manejador para rutas no encontradas
+    
+    Proporciona una respuesta útil para rutas no definidas
+    """
     return JSONResponse(
-        status_code=exc.status_code,
+        status_code=404,
         content={
-            "error": exc.detail,
-            "request_id": getattr(request.state, "request_id", None)
+            "error": "Endpoint not found",
+            "message": f"The requested path '/{full_path}' does not exist",
+            "suggestions": [
+                "Check the API documentation at /api/docs",
+                "Verify the endpoint path and HTTP method",
+                "Ensure you're using the correct API version (/api/v1/)"
+            ]
         }
     )
 
-@app.exception_handler(Exception)
-async def general_exception_handler(request: Request, exc: Exception):
-    return JSONResponse(
-        status_code=500,
-        content={
-            "error": "Internal server error",
-            "request_id": getattr(request.state, "request_id", None)
-        }
-    )
 
+# ========== PUNTO DE ENTRADA PRINCIPAL ==========
 if __name__ == "__main__":
     import uvicorn
+    
     uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=8000,
+        "app.main:app",
+        host=settings.HOST,
+        port=settings.PORT,
         reload=settings.DEBUG,
-        log_level="info"
+        log_level="info",
+        workers=settings.WORKERS if not settings.DEBUG else 1,
+        access_log=True,
     )

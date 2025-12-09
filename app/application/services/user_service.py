@@ -3,8 +3,7 @@ from typing import List, Optional
 from fastapi import HTTPException, status
 from bson import ObjectId
 
-from app.models.user import UserInDB, UserPublic, UserUpdate, UserRole
-from app.schemas.auth import RegisterRequest
+from app.domain.models.user import UserInDB, UserPublic, UserUpdate, UserRole
 
 class UserService:
     def __init__(self, db):
